@@ -215,3 +215,50 @@ test('the ledger records every trial and resume replays it for free', async () =
   );
   assert.equal(after.spentUsd, 0, 'a resumed run should not report new spend');
 });
+
+test('running again with more trials pays only for the new ones', async (t) => {
+  // The answer to "36 trials could only detect a 30pp swing": run it again.
+  // Trials already in the ledger replay for free, so statistical power
+  // accumulates across runs instead of restarting each time.
+  const ledgerPath = join(root, 'cumulative.jsonl');
+  const set = parseRuleSet([{ path: 'CLAUDE.md', content: CLAUDE_MD }]);
+  const base = { ...DEFAULT_CONFIG, concurrency: 1, budget: { maxRuns: 400, maxUsd: 100 } };
+
+  const first = { runs: 0 };
+  const shallow = await ablate(set.rules, [TASK], {
+    root,
+    config: { ...base, trials: 3 },
+    ruleSet: set,
+    adapter: fakeAgent(first),
+    ledgerPath,
+  });
+
+  const second = { runs: 0 };
+  const deep = await ablate(set.rules, [TASK], {
+    root,
+    config: { ...base, trials: 6 },
+    ruleSet: set,
+    adapter: fakeAgent(second),
+    ledgerPath,
+    resume: true,
+  });
+
+  t.diagnostic(`3 trials: ${first.runs} runs, then 6 trials: ${second.runs} more`);
+
+  assert.equal(deep.baseline.n, 6, 'the second run should pool six baseline trials');
+  assert.ok(deep.baseline.n > shallow.baseline.n, 'power did not accumulate');
+  assert.ok(deep.mde < shallow.mde, 'the detectable effect should shrink');
+  // The deeper run legitimately explores further -- more trials reach
+  // significance, so groups that stayed whole before now get split. What must
+  // hold is that nothing already in the ledger was paid for twice.
+  assert.ok(
+    deep.results.length > second.runs,
+    `no trial was replayed: ${deep.results.length} results from ${second.runs} invocations`,
+  );
+  assert.ok(deep.replayedUsd > 0, 'replayed spend was not reported');
+  assert.equal(
+    deep.results.length - second.runs,
+    first.runs,
+    'every trial from the first run should have replayed',
+  );
+});

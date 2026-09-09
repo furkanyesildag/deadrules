@@ -2,13 +2,22 @@ import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { execShell } from '../exec.js';
 import { worktreeDiff, worktreePatch } from '../git.js';
-import type { GradeResult, Grader } from '../types.js';
+import type { AskOutcome, GradeResult, Grader } from '../types.js';
 
 export interface GradeContext {
   cwd: string;
   /** Per-grader cap; a rules change can easily send a test suite into a loop. */
   defaultTimeoutMs: number;
+  /**
+   * Answers `judge` graders. Absent when the adapter cannot answer questions,
+   * in which case judge graders fail rather than pass.
+   */
+  judge?: (prompt: string, timeoutMs: number) => Promise<AskOutcome>;
+  judgeTimeoutMs?: number;
 }
+
+/** Beyond this the diff is truncated; a judge cannot read a 200kB patch anyway. */
+const MAX_JUDGE_PATCH = 24_000;
 
 function label(g: Grader): string {
   switch (g.type) {
@@ -24,7 +33,44 @@ function label(g: Grader): string {
       return `at most ${g.max} files changed`;
     case 'touched':
       return `touched ${g.paths.join(', ')}`;
+    case 'judge':
+      return g.label ?? `judged: ${g.rubric.slice(0, 50)}`;
   }
+}
+
+/**
+ * The judge sees the diff and the criterion, and nothing else.
+ *
+ * Withholding the repository is the point: if the judge could read the rules
+ * file, it would be scoring whether the rule was followed by looking the rule
+ * up, and every variant that still contained the rule would score well by
+ * construction.
+ */
+function judgePrompt(rubric: string, patch: string): string {
+  const body =
+    patch.length > MAX_JUDGE_PATCH
+      ? `${patch.slice(0, MAX_JUDGE_PATCH)}\n[diff truncated]`
+      : patch;
+  return [
+    'You are grading one code change against one criterion.',
+    '',
+    'CRITERION',
+    rubric,
+    '',
+    'DIFF',
+    body || '(the change is empty)',
+    '',
+    'Answer PASS if the change meets the criterion and FAIL if it does not.',
+    'An empty diff, or one that does not address the criterion, is a FAIL.',
+    'Reply with exactly one word: PASS or FAIL.',
+  ].join('\n');
+}
+
+/** Takes the last verdict word, since a model often restates before answering. */
+function parseVerdict(text: string): boolean | null {
+  const matches = text.match(/\b(PASS|FAIL)\b/gi);
+  if (!matches || matches.length === 0) return null;
+  return (matches[matches.length - 1] ?? '').toUpperCase() === 'PASS';
 }
 
 /** Only `+` lines of the patch, so a pre-existing match is not blamed on the agent. */
@@ -107,6 +153,35 @@ export async function runGrader(g: Grader, ctx: GradeContext): Promise<GradeResu
         label: name,
         pass: missing.length === 0,
         ...(missing.length === 0 ? {} : { detail: `untouched: ${missing.join(', ')}` }),
+      };
+    }
+
+    case 'judge': {
+      if (!ctx.judge) {
+        return {
+          label: name,
+          pass: false,
+          detail: 'no judge available; set agent.askCmd or use the claude adapter',
+        };
+      }
+      const patch = await worktreePatch(ctx.cwd);
+      const answer = await ctx.judge(
+        judgePrompt(g.rubric, patch),
+        ctx.judgeTimeoutMs ?? 120_000,
+      );
+      if (answer.error) {
+        return { label: name, pass: false, detail: answer.error, costUsd: answer.costUsd ?? 0 };
+      }
+      const verdict = parseVerdict(answer.text);
+      return {
+        label: name,
+        // An unreadable verdict fails closed: a judge that did not answer is
+        // not evidence that the change was good.
+        pass: verdict === true,
+        ...(verdict === null
+          ? { detail: `unparseable verdict: ${answer.text.trim().slice(0, 80)}` }
+          : {}),
+        costUsd: answer.costUsd ?? 0,
       };
     }
   }

@@ -1,7 +1,19 @@
+import { tmpdir } from 'node:os';
 import { execShell } from '../../exec.js';
-import type { AgentAdapter, AgentRunOptions, AgentRunOutcome } from '../../types.js';
+import type {
+  AgentAdapter,
+  AgentRunOptions,
+  AgentRunOutcome,
+  AskOutcome,
+} from '../../types.js';
 
 export interface CommandAdapterOptions {
+  /**
+   * Command line for the `judge` grader, answering on stdout. Without it,
+   * judge graders fail rather than pass, so a missing judge can never be
+   * mistaken for a rule that worked.
+   */
+  askCmd?: string;
   /**
    * A shell command line. `{{prompt}}` is substituted with a shell-quoted
    * prompt, `{{cwd}}` with the worktree path, `{{model}}` with the model name.
@@ -37,6 +49,23 @@ export function commandAdapter(opts: CommandAdapterOptions): AgentAdapter {
       }
       return null;
     },
+
+    ...(opts.askCmd
+      ? {
+          async ask(prompt: string, timeoutMs: number): Promise<AskOutcome> {
+            const line = (opts.askCmd as string).replace(
+              /\{\{prompt\}\}/g,
+              shellQuote(prompt),
+            );
+            const res = await execShell(line, { cwd: tmpdir(), timeoutMs, input: prompt });
+            if (res.timedOut) return { text: '', error: 'judge timed out' };
+            if (res.code !== 0) {
+              return { text: '', error: `judge exited ${res.code}: ${res.stderr.slice(0, 150)}` };
+            }
+            return { text: res.stdout, costUsd: opts.costUsd ?? 0 };
+          },
+        }
+      : {}),
 
     async run(o: AgentRunOptions): Promise<AgentRunOutcome> {
       const line = opts.cmd

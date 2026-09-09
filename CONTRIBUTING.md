@@ -37,3 +37,30 @@ Graders live in `src/grade/graders.ts`. Add the variant to the `Grader` union in
 `src/types.ts`, a `label()` case, and the branch that runs it. Graders that look
 at what changed should read added diff lines only, so a pre-existing match in
 the repo is not blamed on the agent.
+
+## The judge grader
+
+`judge` asks a model whether a change meets a rubric. Two invariants are load
+bearing and both have tests:
+
+- It is shown the diff and the rubric and nothing else. Never give it the
+  worktree or the rules file — a judge that can read `CLAUDE.md` scores the
+  rule by looking the rule up, and every variant still containing the rule
+  passes for free.
+- It fails closed. Timeouts, errors and unparseable answers are failures, never
+  passes.
+
+## Regenerating the README images
+
+```sh
+npm run images
+```
+
+The SVGs are produced by piping the real reporter through
+`scripts/render-svg.mjs`, so the picture cannot drift from the tool. The
+ablation numbers in `docs/report.svg` are invented and the caption says so; to
+render a real one, pipe an actual run:
+
+```sh
+FORCE_COLOR=1 deadrules ablate | node scripts/render-svg.mjs > docs/report.svg
+```

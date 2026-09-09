@@ -124,7 +124,13 @@ async function runTrial(
     const grades = await grade(item.task.grade, {
       cwd: dir,
       defaultTimeoutMs: config.gradeTimeoutMs,
+      ...(adapter.ask ? { judge: adapter.ask.bind(adapter) } : {}),
+      judgeTimeoutMs: config.judgeTimeoutMs,
     });
+
+    // Judge graders spend real money, so their cost belongs in the trial's
+    // total or the budget cap would only be counting half the bill.
+    const gradeCost = grades.reduce((sum, g) => sum + (g.costUsd ?? 0), 0);
 
     return {
       variantId: item.variant.id,
@@ -132,7 +138,7 @@ async function runTrial(
       trial: item.trial,
       pass: grades.length > 0 && grades.every((g) => g.pass),
       grades,
-      costUsd: outcome.costUsd ?? 0,
+      costUsd: (outcome.costUsd ?? 0) + gradeCost,
       durationMs: Date.now() - started,
       ...(outcome.turns !== undefined ? { turns: outcome.turns } : {}),
     };

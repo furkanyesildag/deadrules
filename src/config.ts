@@ -10,6 +10,8 @@ export interface AgentConfig {
   bin?: string;
   /** Shell template for `kind: command`. */
   cmd?: string;
+  /** Shell template answering `judge` graders on stdout, for `kind: command`. */
+  askCmd?: string;
   promptOnStdin?: boolean;
   /** Flat per-trial cost for `kind: command`, which cannot report its own. */
   costUsd?: number;
@@ -33,10 +35,15 @@ export interface Config {
   /** Rules files to ablate. Empty means auto-discover. */
   rules: string[];
   agent: AgentConfig;
-  /** Repetitions per (variant, task). More trials, narrower intervals. */
+  /**
+   * Repetitions per (variant, task). Prefer adding tasks over adding trials:
+   * a task is independent evidence, a repetition only averages out noise.
+   */
   trials: number;
   concurrency: number;
   gradeTimeoutMs: number;
+  /** Cap for one `judge` grader call. */
+  judgeTimeoutMs: number;
   budget: BudgetConfig;
   /** Significance level for the pass-rate tests, after FDR correction. */
   alpha: number;
@@ -58,6 +65,7 @@ export const DEFAULT_CONFIG: Config = {
   trials: 3,
   concurrency: 2,
   gradeTimeoutMs: 300_000,
+  judgeTimeoutMs: 120_000,
   budget: { maxRuns: 80, maxUsd: 15 },
   alpha: 0.05,
 };
@@ -88,6 +96,7 @@ export function buildAdapter(cfg: Config): AgentAdapter {
   if (cfg.agent.kind === 'command') {
     return commandAdapter({
       cmd: cfg.agent.cmd ?? '',
+      ...(cfg.agent.askCmd !== undefined ? { askCmd: cfg.agent.askCmd } : {}),
       ...(cfg.agent.costUsd !== undefined ? { costUsd: cfg.agent.costUsd } : {}),
       ...(cfg.agent.promptOnStdin !== undefined
         ? { promptOnStdin: cfg.agent.promptOnStdin }

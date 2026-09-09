@@ -113,6 +113,14 @@ async function loadRuleSet(root: string, cfg: Config) {
   return set;
 }
 
+/** Cuts at a word boundary so a listed rule never ends mid-word. */
+function truncate(text: string, width: number): string {
+  if (text.length <= width) return text;
+  const cut = text.slice(0, width);
+  const space = cut.lastIndexOf(' ');
+  return `${(space > width * 0.6 ? cut.slice(0, space) : cut).trimEnd()}…`;
+}
+
 async function cmdRules(root: string, args: Args): Promise<number> {
   const cfg = applyOverrides(await loadConfig(root), args);
   const set = await loadRuleSet(root, cfg);
@@ -131,7 +139,7 @@ async function cmdRules(root: string, args: Args): Promise<number> {
       process.stdout.write(`  ${where}\n`);
     }
     const head = rule.text.replace(/^\s*(?:[-*+]|\d+[.)])\s+/, '').split('\n')[0] ?? '';
-    process.stdout.write(`    ${rule.id}  ${head.slice(0, 68)}\n`);
+    process.stdout.write(`    ${rule.id}  ${truncate(head, 66)}\n`);
   }
   process.stdout.write(
     `\n  ${set.rules.length} rules across ${set.files.length} file(s).\n` +
@@ -151,7 +159,11 @@ async function cmdInit(root: string, args: Args): Promise<number> {
   };
   await writeFile(join(dir, 'config.json'), `${JSON.stringify(config, null, 2)}\n`, 'utf8');
 
-  const count = num(args, 'mine') ?? 5;
+  // Twelve rather than a handful: tasks add independent evidence, while extra
+  // trials only average noise out of evidence already gathered. Twelve tasks at
+  // the default three trials is what puts the detectable effect near 33pp
+  // instead of 51pp.
+  const count = num(args, 'mine') ?? 12;
   const tasks = await mineTasks(root, count, testCommand);
   for (const task of tasks) {
     await writeFile(join(root, TASKS_DIR, `${task.id}.md`), renderTaskFile(task), 'utf8');

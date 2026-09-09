@@ -49,7 +49,14 @@ export type Grader =
   | { type: 'file-absent'; path: string }
   | { type: 'no-new-pattern'; pattern: string; flags?: string }
   | { type: 'diff-files-max'; max: number }
-  | { type: 'touched'; paths: string[] };
+  | { type: 'touched'; paths: string[] }
+  /**
+   * Asks a model whether the change meets a rubric. The only grader that can
+   * see style, tone, comment quality or commit-message shape -- the rules
+   * people argue about most, and the ones every other grader here reads as
+   * dead. Opt-in: it costs a model call per trial.
+   */
+  | { type: 'judge'; rubric: string; label?: string };
 
 export interface Task {
   id: string;
@@ -70,6 +77,8 @@ export interface GradeResult {
   label: string;
   pass: boolean;
   detail?: string;
+  /** Spend this grader itself incurred. Only the `judge` grader costs anything. */
+  costUsd?: number;
 }
 
 /** One (variant, task, trial) measurement. Agents are not seedable, so a
@@ -115,10 +124,22 @@ export interface AgentRunOutcome {
   agentReportedError?: string;
 }
 
+export interface AskOutcome {
+  text: string;
+  costUsd?: number;
+  error?: string;
+}
+
 export interface AgentAdapter {
   name: string;
   /** Throws only on programmer error; agent failures come back as `ok: false`. */
   run(opts: AgentRunOptions): Promise<AgentRunOutcome>;
   /** Human-readable reason the adapter cannot run here, or null when it can. */
   preflight(): Promise<string | null>;
+  /**
+   * One-shot question with a text answer and no file access, used by the
+   * `judge` grader. Adapters that cannot answer questions omit this, and
+   * judge graders then fail closed rather than silently passing.
+   */
+  ask?(prompt: string, timeoutMs: number): Promise<AskOutcome>;
 }

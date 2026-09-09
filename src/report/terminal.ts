@@ -2,7 +2,11 @@ import type { AblationOutcome, RuleFinding } from '../ablate/plan.js';
 import { rate, wilson, type Comparison, type Proportion } from '../ablate/stats.js';
 import type { Rule } from '../types.js';
 
-const useColor = Boolean(process.stdout.isTTY) && !process.env['NO_COLOR'];
+// FORCE_COLOR lets a redirected run keep its colours, which is what the SVG
+// renderer in scripts/ reads. NO_COLOR wins over both, per the convention.
+const useColor =
+  !process.env['NO_COLOR'] &&
+  (Boolean(process.env['FORCE_COLOR']) || Boolean(process.stdout.isTTY));
 
 const ESC = String.fromCharCode(27);
 const paint = (code: string) => (s: string) =>

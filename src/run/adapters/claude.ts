@@ -1,5 +1,11 @@
+import { tmpdir } from 'node:os';
 import { exec } from '../../exec.js';
-import type { AgentAdapter, AgentRunOptions, AgentRunOutcome } from '../../types.js';
+import type {
+  AgentAdapter,
+  AgentRunOptions,
+  AgentRunOutcome,
+  AskOutcome,
+} from '../../types.js';
 
 export interface ClaudeAdapterOptions {
   /** Defaults to `claude` on PATH. */
@@ -32,6 +38,24 @@ export function claudeAdapter(opts: ClaudeAdapterOptions = {}): AgentAdapter {
       const res = await exec(bin, ['--version'], { timeoutMs: 20_000 });
       if (res.code === 0) return null;
       return `\`${bin}\` is not runnable. Install Claude Code (npm i -g @anthropic-ai/claude-code) or set agent.bin.`;
+    },
+
+    async ask(prompt: string, timeoutMs: number): Promise<AskOutcome> {
+      // No tools and one turn: the judge reads the text it was handed and
+      // answers. It must not be able to go looking at the repository, or it
+      // would find the rules file whose effect is being measured.
+      const res = await exec(
+        bin,
+        ['-p', prompt, '--output-format', 'json', '--max-turns', '1', '--allowed-tools', ''],
+        { cwd: tmpdir(), timeoutMs },
+      );
+      if (res.timedOut) return { text: '', error: `judge timed out after ${timeoutMs}ms` };
+
+      const parsed = parseJson(res.stdout);
+      if (!parsed) {
+        return { text: '', error: res.stderr.trim().slice(0, 200) || 'no JSON from the judge' };
+      }
+      return { text: parsed.result ?? '', costUsd: parsed.total_cost_usd ?? 0 };
     },
 
     async run(o: AgentRunOptions): Promise<AgentRunOutcome> {
