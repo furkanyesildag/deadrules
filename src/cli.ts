@@ -351,16 +351,18 @@ async function cmdDiff(root: string, args: Args): Promise<number> {
 async function main(): Promise<number> {
   const args = parseArgs(process.argv.slice(2));
 
-  if (!args.command || args.flags.has('help') || args.command === 'help') {
-    process.stdout.write(`${USAGE}\n`);
-    return args.command ? 0 : 1;
-  }
-  if (args.flags.has('version')) {
+  // Checked before the usage branch: `deadrules --version` carries no command,
+  // and would otherwise print the help text and exit non-zero.
+  if (args.flags.has('version') || args.command === 'version') {
     const pkg = JSON.parse(
       await readFile(new URL('../package.json', import.meta.url), 'utf8'),
     ) as { version: string };
     process.stdout.write(`${pkg.version}\n`);
     return 0;
+  }
+  if (!args.command || args.flags.has('help') || args.command === 'help') {
+    process.stdout.write(`${USAGE}\n`);
+    return args.command ? 0 : 1;
   }
 
   const root = await repoRoot(process.cwd());
