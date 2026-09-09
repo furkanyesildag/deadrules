@@ -1,0 +1,50 @@
+{
+  "name": "deadrules",
+  "version": "0.1.0",
+  "description": "You have 40 rules in your CLAUDE.md. deadrules removes each one, measures, and tells you which ones actually changed the agent's behaviour.",
+  "keywords": [
+    "ai",
+    "agent",
+    "claude-code",
+    "cursor",
+    "codex",
+    "claude-md",
+    "agents-md",
+    "prompt-engineering",
+    "eval",
+    "ablation"
+  ],
+  "homepage": "https://github.com/furkanyesildag/deadrules#readme",
+  "bugs": "https://github.com/furkanyesildag/deadrules/issues",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/furkanyesildag/deadrules.git"
+  },
+  "license": "MIT",
+  "type": "module",
+  "bin": {
+    "deadrules": "dist/cli.js"
+  },
+  "exports": {
+    ".": "./dist/index.js"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=18.17"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json && node scripts/chmod-bin.mjs",
+    "prepare": "npm run build",
+    "prepublishOnly": "npm run build",
+    "test": "npm run build && node --test tests/*.test.mjs",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "typescript": "^5.7.2"
+  }
+}
