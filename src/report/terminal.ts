@@ -133,6 +133,7 @@ export function renderAblationReport(
   const loadBearing = byStatus('load-bearing');
   const harmful = byStatus('harmful');
   const none = byStatus('no-evidence');
+  const groupMatters = byStatus('group-matters');
   const untested = byStatus('untested');
 
   if (loadBearing.length) {
@@ -174,6 +175,30 @@ export function renderAblationReport(
     out.push('');
   }
 
+  if (groupMatters.length) {
+    out.push(
+      `  ${bold('GROUP MATTERS')} ${dim('something in here changed the outcome, but which is unresolved')}`,
+    );
+    // Group by the set they were measured in, so the reader sees "one of these
+    // four", not a flat list that hides how far the search actually got.
+    const groups = new Map<string, RuleFinding[]>();
+    for (const f of groupMatters) {
+      const key = [f.rule.id, ...(f.groupWith ?? [])].sort().join(' ');
+      groups.set(key, [...(groups.get(key) ?? []), f]);
+    }
+    for (const [key, members] of groups) {
+      const first = members[0];
+      out.push(`    ${dim(`1 of ${key.split(' ').length}:`)} ${yellow(key)}`);
+      if (first?.comparison) {
+        out.push(
+          dim(`      removing all of them: ${pp(first.comparison.diff)}  ${significance(first.comparison)}`),
+        );
+      }
+    }
+    out.push(dim('    raise --budget-runs to find out which'));
+    out.push('');
+  }
+
   if (untested.length) {
     out.push(`  ${bold('UNTESTED')}      ${dim(`${untested.length} rules · budget ran out`)}`);
     out.push(`    ${dim(untested.map((f) => f.rule.id).join(' '))}`);
@@ -182,16 +207,27 @@ export function renderAblationReport(
 
   out.push(`  ${dim('─'.repeat(76))}`);
   out.push(
-    `  ${loadBearing.length} load-bearing · ${harmful.length} harmful · ${none.length} no evidence · ${untested.length} untested`,
+    `  ${loadBearing.length} load-bearing · ${harmful.length} harmful · ${none.length} no evidence` +
+      `${groupMatters.length ? ` · ${groupMatters.length} in groups that matter` : ''} · ${untested.length} untested`,
   );
   out.push(
     cyan(
-      `  "No evidence" is not "no effect": at ${outcome.baseline.n} trials this run could only`,
+      [
+        `  "No evidence" is not "no effect": on ${outcome.armSizes.baseline} baseline trials against`,
+        `  ${outcome.armSizes.variant} per variant, this run could only detect a swing of about`,
+        `  ${Math.round(outcome.mde * 100)}pp. More tasks, or more trials, shrink that.`,
+      ].join('\n'),
     ),
   );
   out.push(
-    cyan(
-      `  detect a swing of about ${Math.round(outcome.mde * 100)}pp or larger. Raise trials to shrink that.`,
+    dim(
+      [
+        '  Pass rates are compared task by task and combined, so a hard task is',
+        "  not mistaken for a rule's effect. q-values correct across all " +
+          `${outcome.testsPerformed} tests`,
+        '  this run made, but the search reached individual rules by passing',
+        '  earlier uncorrected group tests, so read them as nominal.',
+      ].join('\n'),
     ),
   );
   if (outcome.stoppedEarly) out.push(yellow(`  stopped early: ${outcome.stoppedEarly}`));

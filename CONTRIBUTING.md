@@ -18,6 +18,27 @@ If you change the search strategy, the test to watch is
 `bisecting scales better than testing every rule alone` — it fails if the
 bisect degrades toward one sweep per rule.
 
+## Invariants with tests behind them
+
+Break one of these and a test should fail. If you change the behaviour on
+purpose, change the test and say why in the commit.
+
+- **Both budget caps cover the whole run.** `maxUsd` used to be handed to each
+  round untouched while each round counted from zero, which turned a stated $15
+  limit into $15 per sweep. In-flight trials are charged the running average so
+  parallel lanes cannot slip past the cap while their bill is outstanding.
+- **Comparisons are stratified by task.** Trials cluster inside tasks, so
+  pooling lets task difficulty masquerade as a rule's effect. One 2x2 table per
+  task, combined with a Mantel-Haenszel statistic whose null is sampled rather
+  than approximated.
+- **A grader that cannot reach a verdict voids the trial.** `errored` excludes
+  it. Scoring it as a failure would let judge timeouts, which correlate with
+  load, manufacture an effect.
+- **The baseline is measured more deeply than any variant.** Every finding is a
+  comparison against it, so a lucky baseline would bias the whole report.
+- **Interrupts clean up.** Ctrl-C removes every checked-out worktree; there is a
+  test that starts a run, signals it, and inspects `git worktree list`.
+
 ## Things worth knowing
 
 - **No runtime dependencies.** Dev dependencies are fine; anything the

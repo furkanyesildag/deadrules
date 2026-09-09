@@ -157,9 +157,15 @@ works are deliberate:
   never the repository, never the rules file. If it could read `CLAUDE.md` it
   would be scoring the rule by looking the rule up, and every variant that
   still contained the rule would pass for free.
-- **It fails closed.** A timeout, an error, or an answer that is not `PASS` or
-  `FAIL` counts as a failure. A judge that did not answer is not evidence that
-  the change was good.
+- **A judge that cannot answer voids the trial.** A timeout, an API error, or a
+  reply that is neither `PASS` nor `FAIL` excludes that trial from the
+  statistics rather than scoring it as a failure. Judge failures correlate with
+  rate limits and parallel load, so counting them as failures would cluster
+  them on whichever variants happened to run during a slow patch and
+  manufacture an effect out of infrastructure noise.
+- **Pin the model.** `agent.judgeModel` follows `agent.model` unless you set
+  it. Left to the CLI default, half of every measurement would be attributed to
+  a model the report cannot name.
 
 A judge is itself a noisy instrument. Its verdicts are one more measurement
 subject to the same statistics as everything else here, not ground truth.
@@ -175,22 +181,46 @@ Instead `deadrules` removes groups and only splits the ones that moved the
 needle. On a 16-rule fixture with one load-bearing rule, the search finds it in
 50 agent runs where the exhaustive sweep needs 90.
 
-**Statistics that admit their limits.** Pass rates are compared with a
-two-tailed Fisher exact test, because at these sample sizes the normal
-approximation means nothing. Intervals are Wilson score intervals. Testing 40
-rules is 40 simultaneous hypotheses, so p-values are corrected with
-Benjamini-Hochberg and reported as q-values. Every report ends with the
-smallest effect the run could have detected.
+**Every task is compared only against itself.** Trials are not exchangeable:
+they cluster inside tasks, because a task is easy or hard whatever the rules
+say. Pooling them into one table lets that spread masquerade as variance in the
+rule's effect. `deadrules` builds one 2x2 table per task and combines them with
+a Mantel-Haenszel statistic, whose null it samples exactly rather than
+approximating — at three trials per task the chi-square limit the usual test
+leans on has nothing to stand on. This is also free power: removing task
+difficulty from the comparison finds smaller effects on the same budget.
+
+**The baseline is measured twice as deeply.** Every finding in the report is a
+comparison against the same unmodified arm, so a lucky baseline would bias all
+of them at once. It runs at `trials × 2` by default.
+
+**Statistics that admit their limits.** Intervals are Wilson score intervals.
+Testing 40 rules is 40 simultaneous hypotheses, so p-values are corrected with
+Benjamini-Hochberg and reported as q-values. Every report ends with the smallest
+effect the run could have detected.
 
 The tool never says a rule has no effect. It says there is no evidence of one,
 and tells you how hard it looked.
 
+**Where that honesty still falls short.** Two caveats the report prints and this
+README should not bury:
+
+- The q-values are corrected across every comparison the run made, group tests
+  included. But the search *reached* an individual rule by passing earlier
+  group tests at an uncorrected threshold, so the family being corrected was
+  itself selected for looking significant. Treat individual q-values as
+  nominal, not as guarantees.
+- The detectable-effect figure comes from a normal approximation while the
+  tests actually run are exact and discrete. Discrete tests are conservative,
+  so the true detectable effect is a little larger than the number printed.
+
 ## Statistical power, and how to buy more of it
 
-This is the honest sharp edge. A default run pools 36 trials per arm, which can
-detect a swing of about 33 percentage points. Plenty of real rules have smaller
-effects than that, and they will come back "no evidence" — not because they do
-nothing, but because 36 trials cannot see them.
+This is the honest sharp edge. A default run gives each variant 36 trials and
+the baseline 72, which together can detect a swing of about 29 percentage
+points. Plenty of real rules have smaller effects than that, and they will come
+back "no evidence" — not because they do nothing, but because this many trials
+cannot see them.
 
 Power accumulates across runs. Every trial is appended to
 `.deadrules/runs/ledger.jsonl` as it completes, and `--resume` replays what is
@@ -201,8 +231,8 @@ deadrules ablate --trials 3            # a first look
 deadrules ablate --trials 9 --resume   # pays for six more trials, not nine
 ```
 
-The second run pools all nine trials, so the detectable effect drops from 33pp
-to 19pp and you only paid for the difference. Halving the detectable effect
+The second run pools all nine trials, so the detectable effect drops from 29pp
+to 16pp and you only paid for the difference. Halving the detectable effect
 costs four times the trials — that is the arithmetic, and no tool can talk you
 out of it.
 
@@ -220,7 +250,9 @@ budget and a test suite, is hours. This is a thing you start before you stop for
 the day and read in the morning, not something you run between commits. `diff`
 is the one that fits in a coffee break.
 
-Both caps are hard, checked before each invocation rather than after:
+Both caps cover the whole run, not each round of it, and are checked before
+each invocation. In-flight trials are charged the running average, so parallel
+lanes cannot slip past the limit while their bill is still outstanding:
 
 ```json
 { "budget": { "maxRuns": 80, "maxUsd": 15 } }
@@ -249,6 +281,10 @@ This is a measurement tool, and measurements have edges. The honest list:
 - **Interaction effects.** Two rules that only work together get removed in the
   same group, the group looks load-bearing, and the bisect blames whichever half
   happened to fail.
+- **A group that matters is not always resolved.** When the budget runs out
+  mid-search, rules sit under `GROUP MATTERS`: something in that set changed
+  the outcome and the search could not say which. That is a partial answer, and
+  the report keeps it rather than downgrading those rules to `untested`.
 - **Agents are not seedable.** A "trial" is a plain repetition. Run-to-run
   variance is real, and the confidence intervals are the only defence.
 - **Model-specific.** Results hold for the model you measured. A rule that is
@@ -285,11 +321,13 @@ never by the exit code.
   "agent": {
     "kind": "claude",
     "model": "claude-haiku-4-5-20251001",
+    "judgeModel": "claude-haiku-4-5-20251001",
     "maxTurns": 30,
     "timeoutMs": 600000,
     "permissionMode": "acceptEdits"
   },
   "trials": 3,
+  "baselineTrials": 6,
   "concurrency": 2,
   "gradeTimeoutMs": 300000,
   "judgeTimeoutMs": 120000,

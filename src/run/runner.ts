@@ -1,3 +1,5 @@
+import { spawnSync } from 'node:child_process';
+import { rmSync } from 'node:fs';
 import { mkdtemp, mkdir, rm, writeFile, appendFile, readFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
@@ -39,6 +41,51 @@ export interface RunSummary {
   stoppedEarly?: string;
 }
 
+interface LiveWorktree {
+  root: string;
+  dir: string;
+  parent: string;
+}
+
+const live = new Set<LiveWorktree>();
+let cleanupInstalled = false;
+
+/**
+ * Removes every worktree still checked out, synchronously.
+ *
+ * Interrupting a run is a normal thing to do here -- `--resume` exists for it --
+ * so Ctrl-C must not leave the repository carrying dozens of registered
+ * worktrees and the temp directory carrying their checkouts. A signal handler
+ * cannot await, hence the sync calls.
+ */
+function cleanupLiveWorktrees(): void {
+  for (const wt of live) {
+    try {
+      spawnSync('git', ['worktree', 'remove', '--force', wt.dir], {
+        cwd: wt.root,
+        timeout: 10_000,
+        stdio: 'ignore',
+      });
+      rmSync(wt.parent, { recursive: true, force: true });
+    } catch {
+      /* a best-effort cleanup on the way out */
+    }
+  }
+  live.clear();
+}
+
+function installCleanup(): void {
+  if (cleanupInstalled) return;
+  cleanupInstalled = true;
+  for (const signal of ['SIGINT', 'SIGTERM'] as const) {
+    process.once(signal, () => {
+      cleanupLiveWorktrees();
+      // 128 + signal number, so a caller can tell an interrupt from a failure.
+      process.exit(signal === 'SIGINT' ? 130 : 143);
+    });
+  }
+}
+
 function keyOf(item: RunPlanItem): string {
   return `${item.variant.id}::${item.task.id}::${item.trial}`;
 }
@@ -78,7 +125,9 @@ async function runTrial(
   const { root, config, ruleSet } = opts;
   const started = Date.now();
   const base = item.task.base ?? config.base;
-  const parent = await mkdtemp(join(tmpdir(), 'deadrules-'));
+  // A prefix of its own, so a stray checkout is identifiable among whatever
+  // else is in the temp directory.
+  const parent = await mkdtemp(join(tmpdir(), 'deadrules-wt-'));
   // `git worktree add` wants a path it can create, so the temp dir is only the
   // parent and the checkout goes one level down.
   const dir = join(parent, 'wt');
@@ -94,8 +143,10 @@ async function runTrial(
     error,
   });
 
+  const registration: LiveWorktree = { root, dir, parent };
   try {
     await addWorktree(root, dir, base);
+    live.add(registration);
 
     for (const file of renderVariant(ruleSet, item.variant)) {
       const target = join(dir, file.path);
@@ -132,6 +183,15 @@ async function runTrial(
     // total or the budget cap would only be counting half the bill.
     const gradeCost = grades.reduce((sum, g) => sum + (g.costUsd ?? 0), 0);
 
+    const broken = grades.find((g) => g.errored);
+    if (broken) {
+      return {
+        ...fail(`grader could not reach a verdict (${broken.label}): ${broken.detail ?? ''}`),
+        grades,
+        costUsd: (outcome.costUsd ?? 0) + gradeCost,
+      };
+    }
+
     return {
       variantId: item.variant.id,
       taskId: item.task.id,
@@ -145,6 +205,7 @@ async function runTrial(
   } catch (err) {
     return fail((err as Error).message);
   } finally {
+    live.delete(registration);
     await removeWorktree(root, dir);
     await rm(parent, { recursive: true, force: true });
   }
@@ -164,7 +225,10 @@ export async function runPlan(plan: RunPlanItem[], opts: RunnerOptions): Promise
   let stoppedEarly: string | undefined;
   let cursor = 0;
   let started = 0;
+  let finished = 0;
+  let inFlight = 0;
 
+  installCleanup();
   const cached = opts.resume && opts.ledgerPath ? await readLedger(opts.ledgerPath) : new Map();
 
   const record = async (result: RunResult, index: number, fromCache: boolean) => {
@@ -197,14 +261,24 @@ export async function runPlan(plan: RunPlanItem[], opts: RunnerOptions): Promise
         stoppedEarly = `run cap reached (${config.budget.maxRuns} agent runs)`;
         return;
       }
-      if (spentUsd >= config.budget.maxUsd) {
+      // Trials already running have not billed yet, so checking `spentUsd`
+      // alone lets every lane start one more invocation past the cap. Charge
+      // the in-flight trials the average of what finished ones cost.
+      const meanCost = finished > 0 ? spentUsd / finished : 0;
+      if (spentUsd + inFlight * meanCost >= config.budget.maxUsd) {
         stoppedEarly = `spend cap reached ($${config.budget.maxUsd})`;
         return;
       }
       started++;
+      inFlight++;
 
       opts.onTrialStart?.(item, index, plan.length);
-      await record(await runTrial(item, opts, adapter), index, false);
+      try {
+        await record(await runTrial(item, opts, adapter), index, false);
+        finished++;
+      } finally {
+        inFlight--;
+      }
     }
   };
 
@@ -222,12 +296,22 @@ export async function runPlan(plan: RunPlanItem[], opts: RunnerOptions): Promise
   };
 }
 
-export function buildPlan(variants: Variant[], tasks: Task[], trials: number): RunPlanItem[] {
+export function buildPlan(
+  variants: Variant[],
+  tasks: Task[],
+  trials: number,
+  /** Per-variant trial counts, for arms that need more evidence than the rest. */
+  overrides: Record<string, number> = {},
+): RunPlanItem[] {
   const plan: RunPlanItem[] = [];
+  const trialsFor = (v: Variant) => overrides[v.id] ?? trials;
+  const deepest = Math.max(trials, ...variants.map(trialsFor));
+
   // Trial-major order so an interrupted run still has one full pass over every
   // variant, rather than complete data for the first variant and none for the rest.
-  for (let trial = 0; trial < trials; trial++) {
+  for (let trial = 0; trial < deepest; trial++) {
     for (const variant of variants) {
+      if (trial >= trialsFor(variant)) continue;
       for (const task of tasks) plan.push({ variant, task, trial });
     }
   }

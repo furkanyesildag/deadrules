@@ -45,10 +45,16 @@ const stripAnsi = (s) => s.replace(SGR(), '');
 const escapeXml = (s) =>
   s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 
-/** Splits one ANSI line into styled runs. */
-function parseLine(line) {
+/**
+ * Splits one ANSI line into styled runs, continuing from the previous line.
+ *
+ * A terminal keeps an SGR state until it is reset, so a styled block spanning
+ * several lines stays styled. Resetting per line dropped the styling from every
+ * continuation line.
+ */
+function parseLine(line, carried) {
   const runs = [];
-  let style = { color: THEME.text, bold: false, dim: false };
+  let style = { ...carried };
   let buffer = '';
 
   const flush = () => {
@@ -72,7 +78,7 @@ function parseLine(line) {
   }
   buffer += line.slice(last);
   flush();
-  return runs;
+  return { runs, style };
 }
 
 const raw = readFileSync(0, 'utf8').replace(/\s+$/, '');
@@ -83,9 +89,12 @@ const width =
 const captionH = CAPTION ? LINE_H + 14 : 0;
 const height = PAD_TOP + lines.length * LINE_H + PAD_BOTTOM + captionH;
 
+let carried = { color: THEME.text, bold: false, dim: false };
 const body = lines
   .map((line, i) => {
-    const runs = parseLine(line);
+    const parsed = parseLine(line, carried);
+    carried = parsed.style;
+    const runs = parsed.runs;
     if (runs.length === 0) return '';
     const y = PAD_TOP + i * LINE_H;
     let column = 0;

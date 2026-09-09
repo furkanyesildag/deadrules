@@ -45,10 +45,15 @@ export interface Variant {
 
 export type Grader =
   | { type: 'run'; cmd: string; timeoutMs?: number; label?: string }
+  /** `flags` defaults to none, as in a bare regex literal. Pass "i" to ignore case. */
   | { type: 'file-contains'; path: string; pattern: string; flags?: string }
   | { type: 'file-absent'; path: string }
   | { type: 'no-new-pattern'; pattern: string; flags?: string }
   | { type: 'diff-files-max'; max: number }
+  /**
+   * Paths are matched exactly or as a trailing path segment, so `users.ts`
+   * accepts any file of that name anywhere. Give a repo-relative path to pin it.
+   */
   | { type: 'touched'; paths: string[] }
   /**
    * Asks a model whether the change meets a rubric. The only grader that can
@@ -79,6 +84,15 @@ export interface GradeResult {
   detail?: string;
   /** Spend this grader itself incurred. Only the `judge` grader costs anything. */
   costUsd?: number;
+  /**
+   * The grader could not reach a verdict, as opposed to reaching a negative
+   * one. Such a trial is excluded from the statistics rather than counted as a
+   * failure: a judge that timed out says nothing about what the agent did, and
+   * judge failures correlate with rate limits and parallel load, so counting
+   * them as failures would cluster on whichever variants happened to run
+   * during a slow patch.
+   */
+  errored?: boolean;
 }
 
 /** One (variant, task, trial) measurement. Agents are not seedable, so a

@@ -1,8 +1,8 @@
 #!/usr/bin/env node
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
-import { ablate, proportionFor } from './ablate/plan.js';
-import { compare, minDetectableEffect, rate } from './ablate/stats.js';
+import { ablate, proportionFor, strataFor } from './ablate/plan.js';
+import { compareStratified, effectiveArmSize, minDetectableEffect, rate } from './ablate/stats.js';
 import { buildAdapter, CONFIG_PATH, DEFAULT_CONFIG, loadConfig, type Config } from './config.js';
 import { exec } from './exec.js';
 import { isClean, repoRoot } from './git.js';
@@ -322,7 +322,9 @@ async function cmdDiff(root: string, args: Args): Promise<number> {
 
   const beforeProp = proportionFor(summary.results, 'before');
   const afterProp = proportionFor(summary.results, 'after');
-  const cmp = compare(beforeProp, afterProp, cfg.alpha);
+  // Stratified for the same reason the ablation is: a hard task is hard under
+  // either version of the rules, and pooling lets that spread hide the change.
+  const cmp = compareStratified(strataFor(summary.results, 'before', 'after', tasks), cfg.alpha);
 
   if (args.flags.has('json')) {
     process.stdout.write(`${JSON.stringify({ before: beforeProp, after: afterProp, cmp }, null, 2)}\n`);
@@ -335,7 +337,10 @@ async function cmdDiff(root: string, args: Args): Promise<number> {
       : cmp.verdict === 'worse'
         ? 'the current rules do worse'
         : 'no measurable difference';
-  const mde = minDetectableEffect(beforeProp.n, rate(beforeProp) || 0.5);
+  const mde = minDetectableEffect(
+    effectiveArmSize(beforeProp.n, afterProp.n),
+    rate(beforeProp) || 0.5,
+  );
 
   process.stdout.write(
     `\n  deadrules diff\n\n` +

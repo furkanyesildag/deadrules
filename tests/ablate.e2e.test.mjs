@@ -102,8 +102,14 @@ test('ablation finds the one rule the agent actually obeys', async (t) => {
     assert.equal(byId.get(id).status, 'no-evidence', `${id} was misreported as mattering`);
   }
 
-  assert.equal(outcome.baseline.k, 5, 'baseline should pass every trial');
-  assert.equal(outcome.baseline.n, 5);
+  // The baseline arm is measured more deeply than any single variant, because
+  // every finding in the report is a comparison against it.
+  assert.equal(outcome.baseline.n, config.trials * 2, 'baseline should get extra trials');
+  assert.equal(outcome.baseline.k, outcome.baseline.n, 'baseline should pass every trial');
+  assert.ok(
+    outcome.fileEffect.candidate.n < outcome.baseline.n,
+    'variants should not be measured as deeply as the baseline',
+  );
   assert.equal(outcome.fileEffect.verdict, 'worse', 'removing every rule should hurt');
   assert.ok(counters.runs > 0);
   assert.ok(outcome.spentUsd > 0);
@@ -245,7 +251,9 @@ test('running again with more trials pays only for the new ones', async (t) => {
 
   t.diagnostic(`3 trials: ${first.runs} runs, then 6 trials: ${second.runs} more`);
 
-  assert.equal(deep.baseline.n, 6, 'the second run should pool six baseline trials');
+  // The baseline runs at twice the trial count, so six trials means twelve.
+  assert.equal(deep.baseline.n, 12, 'the deeper run should pool twelve baseline trials');
+  assert.equal(shallow.baseline.n, 6);
   assert.ok(deep.baseline.n > shallow.baseline.n, 'power did not accumulate');
   assert.ok(deep.mde < shallow.mde, 'the detectable effect should shrink');
   // The deeper run legitimately explores further -- more trials reach
@@ -261,4 +269,69 @@ test('running again with more trials pays only for the new ones', async (t) => {
     first.runs,
     'every trial from the first run should have replayed',
   );
+});
+
+test('the spend cap covers the whole run, not each round of it', async (t) => {
+  // The cap used to be handed to every round untouched while each round
+  // counted its spend from zero, so a twelve-sweep ablation could spend twelve
+  // times the stated limit and still report the cap as respected.
+  const priced = { runs: 0 };
+  const expensive = {
+    ...fakeAgent(priced),
+    async run(o) {
+      const out = await fakeAgent(priced).run(o);
+      return { ...out, costUsd: 1 };
+    },
+  };
+
+  const decoys = Array.from({ length: 15 }, (_, i) => `- Decoy rule number ${i + 1} does nothing.`);
+  const content = ['# Budget fixture', '', ...decoys.slice(0, 7),
+    '- Always create a file called marker.txt when you finish a task.',
+    ...decoys.slice(7), ''].join('\n');
+  const set = parseRuleSet([{ path: 'CLAUDE.md', content }]);
+
+  const maxUsd = 8;
+  const outcome = await ablate(set.rules, [TASK], {
+    root,
+    config: {
+      ...DEFAULT_CONFIG,
+      trials: 2,
+      concurrency: 1,
+      budget: { maxRuns: 1000, maxUsd },
+    },
+    ruleSet: set,
+    adapter: expensive,
+  });
+
+  t.diagnostic(`spent $${outcome.spentUsd} against a $${maxUsd} cap over ${outcome.runsUsed} runs`);
+  assert.ok(
+    outcome.spentUsd <= maxUsd,
+    `spent $${outcome.spentUsd} against a $${maxUsd} cap`,
+  );
+  assert.ok(outcome.stoppedEarly, 'hitting the spend cap should be reported');
+  assert.match(outcome.stoppedEarly, /spend cap/);
+});
+
+test('a grader that cannot reach a verdict excludes the trial rather than failing it', async () => {
+  // Judge timeouts correlate with rate limits and parallel load. Counted as
+  // failures they would cluster on whichever variants ran during a slow patch
+  // and manufacture an effect out of infrastructure noise.
+  const set = parseRuleSet([{ path: 'CLAUDE.md', content: CLAUDE_MD }]);
+  const counters = { runs: 0 };
+
+  const outcome = await ablate(
+    set.rules,
+    [{ ...TASK, grade: [{ type: 'judge', rubric: 'anything at all' }] }],
+    {
+      root,
+      config: { ...DEFAULT_CONFIG, trials: 2, concurrency: 1, budget: { maxRuns: 40, maxUsd: 10 } },
+      ruleSet: set,
+      // No `ask`, so every judge grader reports that it could not answer.
+      adapter: fakeAgent(counters),
+    },
+  );
+
+  assert.equal(outcome.baseline.n, 0, 'trials with a broken grader must not be counted');
+  assert.ok(outcome.aborted, 'a run that measured nothing should say so');
+  assert.match(outcome.aborted, /never ran successfully|no trial completed/);
 });

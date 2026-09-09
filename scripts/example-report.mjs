@@ -47,6 +47,30 @@ const outcome = {
     dead('R11', 'Be concise in your responses.', ['Communication']),
     dead('R12', 'Do not apologise.', ['Communication']),
     dead('R13', 'Ask before making large changes.', ['Communication']),
+    {
+      rule: rule('R18', 'Run the formatter before you finish.', ['Process']),
+      status: 'group-matters',
+      comparison: compare(baseline, { k: 17, n: 36 }),
+      measuredAs: 'group',
+      groupSize: 3,
+      groupWith: ['R19', 'R20'],
+    },
+    {
+      rule: rule('R19', 'Keep imports sorted.', ['Process']),
+      status: 'group-matters',
+      comparison: compare(baseline, { k: 17, n: 36 }),
+      measuredAs: 'group',
+      groupSize: 3,
+      groupWith: ['R18', 'R20'],
+    },
+    {
+      rule: rule('R20', 'Update the changelog with every user-visible change.', ['Process']),
+      status: 'group-matters',
+      comparison: compare(baseline, { k: 17, n: 36 }),
+      measuredAs: 'group',
+      groupSize: 3,
+      groupWith: ['R18', 'R19'],
+    },
     { rule: rule('R38', 'Prefer composition over inheritance.', ['Design']), status: 'untested', measuredAs: 'none' },
     { rule: rule('R39', 'Keep functions under 50 lines.', ['Design']), status: 'untested', measuredAs: 'none' },
   ],
@@ -54,7 +78,9 @@ const outcome = {
   spentUsd: 6.42,
   replayedUsd: 0,
   runsUsed: 288,
-  mde: 0.33,
+  testsPerformed: 23,
+  mde: 0.29,
+  armSizes: { baseline: 72, variant: 36 },
 };
 
 process.stdout.write(

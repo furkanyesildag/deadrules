@@ -111,7 +111,8 @@ export async function runGrader(g: Grader, ctx: GradeContext): Promise<GradeResu
     case 'file-contains': {
       const content = await readOrNull(join(ctx.cwd, g.path));
       if (content === null) return { label: name, pass: false, detail: 'file not found' };
-      const re = new RegExp(g.pattern, g.flags ?? 'i');
+      // Defaults to case-sensitive, matching `no-new-pattern` and a bare regex.
+      const re = new RegExp(g.pattern, g.flags ?? '');
       return { label: name, pass: re.test(content) };
     }
 
@@ -158,9 +159,12 @@ export async function runGrader(g: Grader, ctx: GradeContext): Promise<GradeResu
 
     case 'judge': {
       if (!ctx.judge) {
+        // A configuration fault, not a measurement: excluded rather than
+        // silently scored, so a missing judge cannot look like a failing agent.
         return {
           label: name,
           pass: false,
+          errored: true,
           detail: 'no judge available; set agent.askCmd or use the claude adapter',
         };
       }
@@ -170,19 +174,25 @@ export async function runGrader(g: Grader, ctx: GradeContext): Promise<GradeResu
         ctx.judgeTimeoutMs ?? 120_000,
       );
       if (answer.error) {
-        return { label: name, pass: false, detail: answer.error, costUsd: answer.costUsd ?? 0 };
+        return {
+          label: name,
+          pass: false,
+          errored: true,
+          detail: answer.error,
+          costUsd: answer.costUsd ?? 0,
+        };
       }
       const verdict = parseVerdict(answer.text);
-      return {
-        label: name,
-        // An unreadable verdict fails closed: a judge that did not answer is
-        // not evidence that the change was good.
-        pass: verdict === true,
-        ...(verdict === null
-          ? { detail: `unparseable verdict: ${answer.text.trim().slice(0, 80)}` }
-          : {}),
-        costUsd: answer.costUsd ?? 0,
-      };
+      if (verdict === null) {
+        return {
+          label: name,
+          pass: false,
+          errored: true,
+          detail: `unparseable verdict: ${answer.text.trim().slice(0, 80)}`,
+          costUsd: answer.costUsd ?? 0,
+        };
+      }
+      return { label: name, pass: verdict, costUsd: answer.costUsd ?? 0 };
     }
   }
 }

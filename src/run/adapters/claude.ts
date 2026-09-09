@@ -17,6 +17,8 @@ export interface ClaudeAdapterOptions {
    */
   permissionMode?: string;
   extraArgs?: string[];
+  /** Model for `ask`. Unset means the CLI default, which is not reproducible. */
+  judgeModel?: string;
 }
 
 interface ClaudeJson {
@@ -44,11 +46,18 @@ export function claudeAdapter(opts: ClaudeAdapterOptions = {}): AgentAdapter {
       // No tools and one turn: the judge reads the text it was handed and
       // answers. It must not be able to go looking at the repository, or it
       // would find the rules file whose effect is being measured.
-      const res = await exec(
-        bin,
-        ['-p', prompt, '--output-format', 'json', '--max-turns', '1', '--allowed-tools', ''],
-        { cwd: tmpdir(), timeoutMs },
-      );
+      const args = [
+        '-p',
+        prompt,
+        '--output-format',
+        'json',
+        '--max-turns',
+        '1',
+        '--allowed-tools',
+        '',
+      ];
+      if (opts.judgeModel) args.push('--model', opts.judgeModel);
+      const res = await exec(bin, args, { cwd: tmpdir(), timeoutMs });
       if (res.timedOut) return { text: '', error: `judge timed out after ${timeoutMs}ms` };
 
       const parsed = parseJson(res.stdout);

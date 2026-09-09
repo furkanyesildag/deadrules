@@ -16,6 +16,12 @@ export interface AgentConfig {
   /** Flat per-trial cost for `kind: command`, which cannot report its own. */
   costUsd?: number;
   model?: string;
+  /**
+   * Model for `judge` graders. Left unset it follows `model`, so both halves of
+   * a measurement are pinned to something the report can name; the CLI default
+   * would otherwise drift with the installed version.
+   */
+  judgeModel?: string;
   maxTurns?: number;
   timeoutMs?: number;
   permissionMode?: string;
@@ -40,6 +46,13 @@ export interface Config {
    * a task is independent evidence, a repetition only averages out noise.
    */
   trials: number;
+  /**
+   * Trials for the unmodified arm. Every finding is a comparison against this
+   * one measurement, so a lucky baseline biases the whole report at once;
+   * giving it more evidence than any single variant is worth the runs.
+   * Defaults to twice `trials`.
+   */
+  baselineTrials?: number;
   concurrency: number;
   gradeTimeoutMs: number;
   /** Cap for one `judge` grader call. */
@@ -63,6 +76,8 @@ export const DEFAULT_CONFIG: Config = {
     permissionMode: 'acceptEdits',
   },
   trials: 3,
+  // Left unset so it tracks `trials`: pinning a number here would stop the
+  // baseline growing when someone runs again at a higher trial count.
   concurrency: 2,
   gradeTimeoutMs: 300_000,
   judgeTimeoutMs: 120_000,
@@ -105,6 +120,7 @@ export function buildAdapter(cfg: Config): AgentAdapter {
   }
   return claudeAdapter({
     ...(cfg.agent.bin !== undefined ? { bin: cfg.agent.bin } : {}),
+    judgeModel: cfg.agent.judgeModel ?? cfg.agent.model,
     ...(cfg.agent.permissionMode !== undefined
       ? { permissionMode: cfg.agent.permissionMode }
       : {}),

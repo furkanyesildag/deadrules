@@ -4,14 +4,26 @@ import { buildPlan, runPlan, type RunnerOptions } from '../run/runner.js';
 import type { Rule, RunResult, Task, Variant } from '../types.js';
 import {
   adjustFdr,
-  compare,
+  compareStratified,
+  effectiveArmSize,
   minDetectableEffect,
   rate,
   type Comparison,
   type Proportion,
+  type Stratum,
 } from './stats.js';
 
-export type RuleStatus = 'load-bearing' | 'harmful' | 'no-evidence' | 'untested';
+export type RuleStatus =
+  | 'load-bearing'
+  | 'harmful'
+  | 'no-evidence'
+  /**
+   * Removing the group this rule belongs to changed the outcome, but the budget
+   * ran out before the group could be split. Something in there matters and we
+   * do not know which -- a partial answer, but one that was paid for.
+   */
+  | 'group-matters'
+  | 'untested';
 
 export interface RuleFinding {
   rule: Rule;
@@ -26,6 +38,8 @@ export interface RuleFinding {
    */
   measuredAs: 'individual' | 'group' | 'none';
   groupSize?: number;
+  /** The other rules removed alongside this one, when the verdict is group-level. */
+  groupWith?: string[];
 }
 
 export interface AblationOutcome {
@@ -38,6 +52,8 @@ export interface AblationOutcome {
   /** What the replayed trials originally cost, when resuming from a ledger. */
   replayedUsd: number;
   runsUsed: number;
+  /** Total pass-rate comparisons performed: the family the q-values correct over. */
+  testsPerformed: number;
   stoppedEarly?: string;
   /**
    * Set when the run was abandoned because the measurement could not mean
@@ -46,12 +62,38 @@ export interface AblationOutcome {
   aborted?: string;
   /** Smallest pass-rate difference this budget could have detected. */
   mde: number;
+  /** Trials behind each side of a comparison; the arms are deliberately unequal. */
+  armSizes: { baseline: number; variant: number };
 }
 
 /** Pass rate for one variant, pooled over tasks and trials. Errored trials are excluded. */
 export function proportionFor(results: RunResult[], variantId: string): Proportion {
   const usable = results.filter((r) => r.variantId === variantId && !r.error);
   return { k: usable.filter((r) => r.pass).length, n: usable.length };
+}
+
+/**
+ * Splits a comparison into one 2x2 table per task.
+ *
+ * Task difficulty is a confounder, not noise: an easy task passes whatever the
+ * rules say. Handing the test one table per task lets it compare each task only
+ * against itself.
+ */
+export function strataFor(
+  results: RunResult[],
+  baselineId: string,
+  candidateId: string,
+  tasks: Task[],
+): Stratum[] {
+  return tasks.map((task) => {
+    const forTask = (variantId: string): Proportion => {
+      const usable = results.filter(
+        (r) => r.variantId === variantId && r.taskId === task.id && !r.error,
+      );
+      return { k: usable.filter((r) => r.pass).length, n: usable.length };
+    };
+    return { key: task.id, baseline: forTask(baselineId), candidate: forTask(candidateId) };
+  });
 }
 
 function chunk<T>(items: T[], parts: number): T[][] {
@@ -94,9 +136,16 @@ export async function ablate(
   const budgetLeft = () => config.budget.maxRuns - runsUsed;
   const sweepCost = tasks.length * config.trials;
 
-  const execute = async (variants: Variant[]) => {
-    const remaining = { ...config, budget: { ...config.budget, maxRuns: budgetLeft() } };
-    const summary = await runPlan(buildPlan(variants, tasks, config.trials), {
+  const execute = async (variants: Variant[], trialOverrides: Record<string, number> = {}) => {
+    // Both caps have to be decremented. Passing `maxUsd` through untouched
+    // made it a per-round allowance, so a twelve-sweep ablation could spend
+    // twelve times the number the user set and the report would still say the
+    // cap was respected.
+    const remaining = {
+      ...config,
+      budget: { maxRuns: budgetLeft(), maxUsd: Math.max(0, config.budget.maxUsd - spentUsd) },
+    };
+    const summary = await runPlan(buildPlan(variants, tasks, config.trials, trialOverrides), {
       ...opts,
       config: remaining,
     });
@@ -108,13 +157,18 @@ export async function ablate(
     return summary;
   };
 
-  // Phase 1: is the document load-bearing at all?
+  // Phase 1: is the document load-bearing at all? The baseline arm gets extra
+  // trials here because every later finding is measured against it.
   const base = baselineVariant();
   const empty = emptyVariant({ files: [], rules });
-  await execute([base, empty]);
+  const baselineTrials = config.baselineTrials ?? config.trials * 2;
+  await execute([base, empty], { [base.id]: baselineTrials });
 
   const baselineProp = proportionFor(all, base.id);
-  const fileEffect = compare(baselineProp, proportionFor(all, empty.id), config.alpha);
+  const compareTo = (variantId: string) =>
+    compareStratified(strataFor(all, base.id, variantId, tasks), config.alpha);
+
+  const fileEffect = compareTo(empty.id);
 
   const findings = new Map<string, RuleFinding>(
     rules.map((rule) => [rule.id, { rule, status: 'untested', measuredAs: 'none' }]),
@@ -132,6 +186,8 @@ export async function ablate(
       spentUsd,
       replayedUsd,
       runsUsed,
+      testsPerformed: 1,
+      armSizes: { baseline: baselineProp.n, variant: tasks.length * config.trials },
       aborted:
         baselineProp.n === 0
           ? 'no trial completed: the agent never ran successfully'
@@ -141,9 +197,16 @@ export async function ablate(
     };
   }
 
-  // Phase 2: bisect. Queue holds groups still to be explained.
-  let queue: Rule[][] = rules.length > 1 ? chunk(rules, 2) : [rules];
-  const pending: { finding: RuleFinding; comparison: Comparison }[] = [];
+  // Phase 2: bisect. The queue holds groups still to be explained, each one
+  // carrying the comparison that sent it there so a group whose split never
+  // happens can still report what was learned about it.
+  let queue: { rules: Rule[]; parent?: Comparison }[] =
+    rules.length > 1 ? chunk(rules, 2).map((g) => ({ rules: g })) : [{ rules }];
+
+  /** Every comparison made, group and individual alike: the correction family. */
+  const tests: { comparison: Comparison; leaf?: RuleFinding }[] = [
+    { comparison: fileEffect },
+  ];
 
   while (queue.length > 0 && !stoppedEarly) {
     if (budgetLeft() < sweepCost) {
@@ -152,22 +215,27 @@ export async function ablate(
     }
 
     const round: Round = { variants: [], groups: [] };
-    for (const group of queue) {
+    const parents: (Comparison | undefined)[] = [];
+    for (const entry of queue) {
       if (budgetLeft() < sweepCost * (round.variants.length + 1)) break;
-      round.variants.push(minusVariant(group.map((r) => r.id)));
-      round.groups.push(group);
+      round.variants.push(minusVariant(entry.rules.map((r) => r.id)));
+      round.groups.push(entry.rules);
+      parents.push(entry.parent);
     }
     if (round.variants.length === 0) break;
 
     await execute(round.variants);
 
-    const next: Rule[][] = [];
+    const next: { rules: Rule[]; parent?: Comparison }[] = [];
     round.variants.forEach((variant, i) => {
       const group = round.groups[i] ?? [];
-      const cmp = compare(baselineProp, proportionFor(all, variant.id), config.alpha);
+      const cmp = compareTo(variant.id);
+      tests.push({ comparison: cmp });
 
       if (cmp.verdict === 'inconclusive') {
-        // Nothing in this group moved the outcome, even all together.
+        // The group as a whole did not move the outcome. That is evidence
+        // about all of them together, and weaker than an individual test --
+        // see the note on cancelling rules above.
         for (const rule of group) {
           findings.set(rule.id, {
             rule,
@@ -175,6 +243,9 @@ export async function ablate(
             comparison: cmp,
             measuredAs: group.length === 1 ? 'individual' : 'group',
             groupSize: group.length,
+            ...(group.length > 1
+              ? { groupWith: group.filter((r) => r.id !== rule.id).map((r) => r.id) }
+              : {}),
           });
         }
         return;
@@ -191,44 +262,63 @@ export async function ablate(
           groupSize: 1,
         };
         findings.set(rule.id, finding);
-        pending.push({ finding, comparison: cmp });
+        tests[tests.length - 1] = { comparison: cmp, leaf: finding };
         return;
       }
 
-      next.push(...chunk(group, 2));
+      for (const half of chunk(group, 2)) next.push({ rules: half, parent: cmp });
     });
 
     queue = next;
   }
 
-  // Anything still queued ran out of budget before it could be split.
-  for (const group of queue) {
-    for (const rule of group) {
-      if (findings.get(rule.id)?.status === 'untested') {
-        findings.set(rule.id, { rule, status: 'untested', measuredAs: 'none' });
-      }
+  // Groups the budget could not split. A sweep was already paid for to learn
+  // that something in there matters, so reporting them as merely `untested`
+  // would throw that away.
+  for (const entry of queue) {
+    for (const rule of entry.rules) {
+      if (findings.get(rule.id)?.status !== 'untested') continue;
+      findings.set(
+        rule.id,
+        entry.parent
+          ? {
+              rule,
+              status: 'group-matters',
+              comparison: entry.parent,
+              measuredAs: 'group',
+              groupSize: entry.rules.length,
+              groupWith: entry.rules.filter((r) => r.id !== rule.id).map((r) => r.id),
+            }
+          : { rule, status: 'untested', measuredAs: 'none' },
+      );
     }
   }
 
-  // Every individual verdict is one test in a family of them; without this
-  // correction a 40-rule sweep reports two false discoveries by construction.
+  // Correct across every comparison the run made, not only the ones that
+  // reached a single rule. Correcting the leaves alone would be correcting a
+  // family that was itself selected for looking significant, which flatters the
+  // q-values; including the group tests that did the selecting is closer to
+  // honest. It is not a complete answer -- the branching used raw alpha as it
+  // went, because those decisions had to be made before the family was known --
+  // and the report says so.
   const corrected = adjustFdr(
-    pending.map((p) => p.comparison),
+    tests.map((t) => t.comparison),
     config.alpha,
   );
   corrected.forEach((c, i) => {
-    const entry = pending[i];
-    if (!entry) return;
-    const updated: RuleFinding = {
-      ...entry.finding,
-      comparison: { ...entry.finding.comparison!, qValue: c.qValue },
+    const entry = tests[i];
+    if (!entry?.leaf) return;
+    const previous = entry.leaf.comparison;
+    if (!previous) return;
+    findings.set(entry.leaf.rule.id, {
+      ...entry.leaf,
+      comparison: { ...previous, qValue: c.qValue },
       status: c.significant
-        ? entry.finding.comparison!.diff < 0
+        ? previous.verdict === 'worse'
           ? 'load-bearing'
           : 'harmful'
         : 'no-evidence',
-    };
-    findings.set(entry.finding.rule.id, updated);
+    });
   });
 
   return {
@@ -239,7 +329,12 @@ export async function ablate(
     spentUsd,
     replayedUsd,
     runsUsed,
+    testsPerformed: tests.length,
     ...(stoppedEarly ? { stoppedEarly } : {}),
-    mde: minDetectableEffect(baselineProp.n, rate(baselineProp) || 0.5),
+    mde: minDetectableEffect(
+      effectiveArmSize(baselineProp.n, tasks.length * config.trials),
+      rate(baselineProp) || 0.5,
+    ),
+    armSizes: { baseline: baselineProp.n, variant: tasks.length * config.trials },
   };
 }
