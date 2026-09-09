@@ -7,6 +7,7 @@
 
 <p align="center">
   <a href="https://www.npmjs.com/package/deadrules"><img alt="npm" src="https://img.shields.io/npm/v/deadrules.svg"></a>
+  <a href="https://github.com/furkanyesildag/deadrules/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/furkanyesildag/deadrules/actions/workflows/ci.yml/badge.svg"></a>
   <a href="LICENSE"><img alt="MIT" src="https://img.shields.io/badge/license-MIT-blue.svg"></a>
   <img alt="zero runtime dependencies" src="https://img.shields.io/badge/runtime%20deps-0-brightgreen">
   <img alt="works with Claude Code, Cursor, Codex" src="https://img.shields.io/badge/agents-claude%20%C2%B7%20cursor%20%C2%B7%20codex-blue">
